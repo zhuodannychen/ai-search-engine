@@ -10,14 +10,12 @@ from sentence_transformers import SentenceTransformer
 import faiss
 
 
-def create_embedding(column_name, model):
-    df[column_name] = df['lemmatized_question_body'].apply(lambda x: model.encode(x))
-    embeddings = np.array(df[column_name].tolist()).astype('float32')
+def create_embedding(model):
+    embeddings = np.array([model.encode(text) for text in df['lemmatized_question_body']]).astype('float32')
     # Create a FAISS index
-    index = faiss.IndexFlatL2(embeddings.shape[1])  # Using L2 distance for similarity measure
+    index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
     return index
-
 
 def fetch_post_info(df_idx):
     info = df.iloc[df_idx]
@@ -42,10 +40,26 @@ def search(query, index, model, top_k=10):
         top_k_posts.append(fetch_post_info(idx))
     return top_k_posts
 
+def count_tokens(text):
+    return len(text.split())
 
-pretrained_model = SentenceTransformer('multi-qa-mpnet-base-cos-v1')
-# pretrained_index = create_embedding('basic-embedding', pretrained_model)
-pretrained_index = faiss.read_index('pretrained_index.faiss')
+PATH_TO_DATA = '../../data/'
 
-query = "how to sort integers in python"
-search(query, pretrained_index, pretrained_model)
+if __name__ == '__main__':
+    df = pd.read_csv(f'{PATH_TO_DATA}stackoverflow-100000')
+    print(df.shape)
+    df['token_count'] = df['question_body'].apply(count_tokens)
+    df = df[df['token_count'] <= 512]
+    print(df.shape)
+
+
+    pretrained_model = SentenceTransformer('multi-qa-mpnet-base-cos-v1')
+    pretrained_index = None
+    if not os.path.exists(f'{PATH_TO_DATA}pretrained_index.faiss'):
+        pretrained_index = create_embedding(pretrained_model)
+        faiss.write_index(pretrained_index, f'{PATH_TO_DATA}pretrained_index.faiss')
+    else:
+        pretrained_index = faiss.read_index(f'{PATH_TO_DATA}pretrained_index.faiss')
+
+    query = "how to sort integers in python"
+    search(query, pretrained_index, pretrained_model)
