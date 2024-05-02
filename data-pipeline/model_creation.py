@@ -2,20 +2,13 @@ import pandas as pd
 import numpy as np
 import os
 import time
-from tqdm import tqdm
-import seaborn as sns
-from textblob import TextBlob
-import matplotlib.pyplot as plt
 from sentence_transformers import SentenceTransformer
 import faiss
 from transformers import T5Tokenizer, T5ForConditionalGeneration
-import torch
 from sentence_transformers import SentenceTransformer, InputExample, losses, models, datasets
 from torch import nn
 import os
 import random
-
-
 
 
 def create_embedding(model, index_name):
@@ -142,12 +135,7 @@ def create_fine_tune_model():
     model.save(f'{PATH_TO_DATA}models/fine-tuned-model')
 
     tuned_model = SentenceTransformer(f'{PATH_TO_DATA}models/fine-tuned-model')
-
-    tuned_index = None
-    if not os.path.exists(f'{PATH_TO_DATA}fine-tuned-index.faiss'):
-        tuned_index = create_embedding(tuned_model, "fine-tuned-index.faiss")
-    else:
-        tuned_index = faiss.read_index(f'{PATH_TO_DATA}fine-tuned-index.faiss')
+    tuned_index = create_embedding(tuned_model, "fine-tuned-index.faiss")
 
     return tuned_model, tuned_index
 
@@ -163,9 +151,18 @@ if __name__ == '__main__':
     df = df[df['token_count'] <= 512]
     print(df.shape)
 
-    # pretrained_model, pretrained_index = create_pretrained_model()
+    pretrained_model, pretrained_index = create_pretrained_model()
     query = "how to sort integers in python"
-    # eval_model(pretrained_model, pretrained_index, query)
+    eval_model(pretrained_model, pretrained_index, query)
 
-    tuned_model, tuned_index = create_fine_tune_model()
+    print()
+    print("++++++++++++++++++++++++++++++++++++++++++++++++")
+    print()
+
+    if not os.path.exists(f'{PATH_TO_DATA}fine-tuned-index.faiss'):
+        tuned_model, tuned_index = create_fine_tune_model()
+    else:
+        tuned_model = SentenceTransformer(f'{PATH_TO_DATA}models/fine-tuned-model')
+        tuned_index = faiss.read_index(f'{PATH_TO_DATA}fine-tuned-index.faiss')
+
     eval_model(tuned_model, tuned_index, query)
