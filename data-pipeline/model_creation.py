@@ -5,7 +5,7 @@ import time
 from sentence_transformers import SentenceTransformer
 import faiss
 from transformers import T5Tokenizer, T5ForConditionalGeneration
-from sentence_transformers import SentenceTransformer, InputExample, losses, models, datasets
+from sentence_transformers import SentenceTransformer, InputExample, losses, models, datasets, CrossEncoder 
 from torch import nn
 import os
 import random
@@ -57,11 +57,12 @@ def create_pretrained_model():
     return pretrained_model, pretrained_index
     
 def eval_model(model, index, query):
-    pretrained_index_results = search(query, index, model)
-    for result in pretrained_index_results:
+    index_results = search(query, index, model)
+    for result in index_results:
         print()
         print(result['question_title'])
         print(result['question_url'])
+    return index_results
 
 
 
@@ -140,6 +141,10 @@ def create_fine_tune_model():
     return tuned_model, tuned_index
 
 
+def cross_score(model_inputs):
+    scores = cross_model.predict(model_inputs)
+    return scores
+
 
 
 PATH_TO_DATA = '../../data/'
@@ -165,4 +170,17 @@ if __name__ == '__main__':
         tuned_model = SentenceTransformer(f'{PATH_TO_DATA}models/fine-tuned-model')
         tuned_index = faiss.read_index(f'{PATH_TO_DATA}fine-tuned-index.faiss')
 
-    eval_model(tuned_model, tuned_index, query)
+    tuned_results = eval_model(tuned_model, tuned_index, query)
+
+    # rerank using cross-encoders
+    cross_model = CrossEncoder('cross-encoder/ms-marco-TinyBERT-L-6', max_length=512)
+    model_inputs = [[query, item['question_body']] for item in tuned_results]
+    scores = cross_score(model_inputs)
+    ce_ranked_results = [{'question_title': inp['question_title'], 'question_url': inp['question_url'], 'cross_score': score} for inp, score in zip(tuned_results, scores)]
+    ce_ranked_results = sorted(ce_ranked_results, key=lambda x: x['cross_score'], reverse=True)
+
+    for result in ce_ranked_results:
+        print()
+        print(result['question_title'])
+        print(result['question_url'])
+        print(result['cross_score'])
