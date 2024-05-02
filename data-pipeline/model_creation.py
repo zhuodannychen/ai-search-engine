@@ -8,13 +8,23 @@ from textblob import TextBlob
 import matplotlib.pyplot as plt
 from sentence_transformers import SentenceTransformer
 import faiss
+from transformers import T5Tokenizer, T5ForConditionalGeneration
+import torch
+from sentence_transformers import SentenceTransformer, InputExample, losses, models, datasets
+from torch import nn
+import os
+import random
 
 
-def create_embedding(model):
+
+
+def create_embedding(model, index_name):
+    print('Creating embeddings...')
     embeddings = np.array([model.encode(text) for text in df['lemmatized_question_body']]).astype('float32')
     # Create a FAISS index
     index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
+    faiss.write_index(index, f'{PATH_TO_DATA}{index_name}')
     return index
 
 def fetch_post_info(df_idx):
@@ -22,7 +32,8 @@ def fetch_post_info(df_idx):
     meta_info = {
         'question_title': info['question_title'],
         'question_body': info['question_body'],
-        'question_score': info['question_score']
+        'question_score': info['question_score'],
+        'question_url': f"https://stackoverflow.com/questions/{info['question_id']}"
     }
     return meta_info
 
@@ -43,6 +54,103 @@ def search(query, index, model, top_k=10):
 def count_tokens(text):
     return len(text.split())
 
+def create_pretrained_model():
+    pretrained_model = SentenceTransformer('multi-qa-mpnet-base-cos-v1')
+    pretrained_index = None
+    if not os.path.exists(f'{PATH_TO_DATA}pretrained_index.faiss'):
+        pretrained_index = create_embedding(pretrained_model, 'pretrained_index.faiss')
+    else:
+        pretrained_index = faiss.read_index(f'{PATH_TO_DATA}pretrained_index.faiss')
+    return pretrained_model, pretrained_index
+    
+def eval_model(model, index, query):
+    pretrained_index_results = search(query, index, model)
+    for result in pretrained_index_results:
+        print()
+        print(result['question_title'])
+        print(result['question_url'])
+
+
+
+def create_fine_tune_model():
+    print("Creating fine-tuned model...")
+    tokenizer = T5Tokenizer.from_pretrained('BeIR/query-gen-msmarco-t5-large-v1')
+    syn_query_gen_model = T5ForConditionalGeneration.from_pretrained('BeIR/query-gen-msmarco-t5-large-v1')
+    syn_query_gen_model.eval()
+
+    def _removeNonAscii(s):
+        return "".join(i for i in s if ord(i) < 128)
+
+    device = 'cuda'
+    posts = df['question_body'].tolist()
+    batch_size = 32
+    num_queries = 3 # num queries per post
+    max_length_post = 512
+    max_length_query = 64
+
+    syn_query_gen_model.to(device)
+
+    print("Generating queries post pair...")
+    with open(f'{PATH_TO_DATA}gen_queries.tsv', 'w') as file_out:
+        for start_idx in range(0, len(posts), batch_size):
+            cur_post_batch = posts[start_idx:start_idx+batch_size]
+            inputs = tokenizer.prepare_seq2seq_batch(cur_post_batch, max_length=max_length_post, truncation=True, return_tensors='pt').to(device)
+            outputs = syn_query_gen_model.generate(
+                **inputs,
+                max_length=max_length_query,
+                do_sample=True,
+                top_p=0.95,
+                num_return_sequences=num_queries)
+
+            for idx, output in enumerate(outputs):
+                query = tokenizer.decode(output, skip_special_tokens=True)
+                query = _removeNonAscii(query)
+                post = cur_post_batch[int(idx/num_queries)]
+                post = _removeNonAscii(post)
+                file_out.write("{}\t{}\n".format(query.replace("\t", " ").strip(), post.replace("\t", " ").strip()))
+
+    train_samples = [] 
+    with open(f'{PATH_TO_DATA}gen_queries.tsv') as file_in:
+        for line in file_in:
+            try:
+                query, post = line.strip().split('\t')
+                train_samples.append(InputExample(texts=[query, post]))
+            except:
+                pass
+            
+    random.shuffle(train_samples)
+
+    print("Training model...")
+    train_dataloader = datasets.NoDuplicatesDataLoader(train_samples, batch_size=8)
+
+    word_embedding = models.Transformer('sentence-transformers/multi-qa-mpnet-base-cos-v1')
+    pooling = models.Pooling(word_embedding.get_word_embedding_dimension())
+    model = SentenceTransformer(modules=[word_embedding, pooling])
+
+    # loss
+    train_loss = losses.MultipleNegativesRankingLoss(model)
+
+    # tune the model
+    num_epochs = 3
+    warmup_steps = int(len(train_dataloader) * num_epochs * 0.1)
+    model.fit(train_objectives=[(train_dataloader, train_loss)], epochs=num_epochs, warmup_steps=warmup_steps, show_progress_bar=True)
+
+    os.makedirs(f'{PATH_TO_DATA}models', exist_ok=True)
+    model.save(f'{PATH_TO_DATA}models/fine-tuned-model')
+
+    tuned_model = SentenceTransformer(f'{PATH_TO_DATA}models/fine-tuned-model')
+
+    tuned_index = None
+    if not os.path.exists(f'{PATH_TO_DATA}fine-tuned-index.faiss'):
+        tuned_index = create_embedding(tuned_model, "fine-tuned-index.faiss")
+    else:
+        tuned_index = faiss.read_index(f'{PATH_TO_DATA}fine-tuned-index.faiss')
+
+    return tuned_model, tuned_index
+
+
+
+
 PATH_TO_DATA = '../../data/'
 
 if __name__ == '__main__':
@@ -52,14 +160,9 @@ if __name__ == '__main__':
     df = df[df['token_count'] <= 512]
     print(df.shape)
 
-
-    pretrained_model = SentenceTransformer('multi-qa-mpnet-base-cos-v1')
-    pretrained_index = None
-    if not os.path.exists(f'{PATH_TO_DATA}pretrained_index.faiss'):
-        pretrained_index = create_embedding(pretrained_model)
-        faiss.write_index(pretrained_index, f'{PATH_TO_DATA}pretrained_index.faiss')
-    else:
-        pretrained_index = faiss.read_index(f'{PATH_TO_DATA}pretrained_index.faiss')
-
+    # pretrained_model, pretrained_index = create_pretrained_model()
     query = "how to sort integers in python"
-    search(query, pretrained_index, pretrained_model)
+    # eval_model(pretrained_model, pretrained_index, query)
+
+    tuned_model, tuned_index = create_fine_tune_model()
+    eval_model(tuned_model, tuned_index, query)
